@@ -24,8 +24,8 @@ type AppConfig struct {
 	WorkerCount   int           `json:"worker_count"`
 	TestTimeout   time.Duration `json:"test_timeout_seconds"`
 	RetryCount    int           `json:"retry_count"`
-	TargetAddress string        `json:"target_address"`
-	TargetPort    string        `json:"target_port"`
+	TargetAddress string        `json:"sni_address"`
+	TargetPort    string        `json:"sni_port"`
 	TestURL       string        `json:"test_url"`
 }
 
