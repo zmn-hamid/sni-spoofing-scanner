@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -30,24 +29,24 @@ type AppConfig struct {
 }
 
 type ProxyConfig struct {
-	URL         string
-	Protocol    string // "trojan" or "vless"
-	Address     string
-	Port        string
-	Password    string // For trojan
-	UUID        string // For vless
-	Encryption  string // For vless (usually "none")
-	Flow        string // For vless
-	Security    string
-	SNI         string
-	ALPN        string
-	Fingerprint string
-	Network     string
-	Host        string
-	Path        string
-	HeaderType  string // For vless "type" parameter
-	Mode        string // For vless
-	RawURL      string
+	URL             string
+	Protocol        string // "trojan" or "vless"
+	Address         string
+	Port            string
+	Password        string // For trojan
+	UUID            string // For vless
+	Encryption      string // For vless (usually "none")
+	Flow            string // For vless
+	Security        string
+	SNI             string
+	ALPN            string
+	Fingerprint     string
+	Network         string
+	Host            string
+	Path            string
+	HeaderType      string // For vless "type" parameter
+	Mode            string // For vless
+	RawURL          string
 	OriginalAddress string // Store original address for reference
 	OriginalPort    string // Store original port for reference
 }
@@ -93,7 +92,7 @@ func loadAppConfig(configPath string) (*AppConfig, error) {
 	}
 
 	// Read config file
-	data, err := ioutil.ReadFile(configPath)
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %v", err)
 	}
