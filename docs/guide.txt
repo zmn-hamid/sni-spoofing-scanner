@@ -1,0 +1,6 @@
+1. Run the SNI-Spoofing app
+2. Copy "config.example.json" file and rename it to "config.json".
+3. (Optional) Modify the config file if you need to.
+4. Make a "configs.txt" file and put all your configs there. Each config in one line.
+5. Run the app. After it's finished, it will create a file called "working_configs.txt".
+You can use them now.

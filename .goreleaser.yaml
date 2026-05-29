@@ -42,6 +42,12 @@ archives:
     format_overrides:
       - goos: windows
         formats: [zip]
+    files:
+      - LICENSE
+      - config.example.json
+      - xray.exe
+      - src: docs/guide.txt
+        dst: guide.txt
 
 changelog:
   sort: asc
