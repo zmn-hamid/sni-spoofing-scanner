@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -18,14 +19,15 @@ import (
 	"time"
 )
 
-const (
-	XRAYPath      = "./xray.exe"
-	WorkerCount   = 20
-	TestTimeout   = 10 * time.Second
-	RetryCount    = 1
-	TargetAddress = "127.0.0.1"
-	TargetPort    = "40443"
-)
+type AppConfig struct {
+	XRAYPath      string        `json:"xray_path"`
+	WorkerCount   int           `json:"worker_count"`
+	TestTimeout   time.Duration `json:"test_timeout_seconds"`
+	RetryCount    int           `json:"retry_count"`
+	TargetAddress string        `json:"target_address"`
+	TargetPort    string        `json:"target_port"`
+	TestURL       string        `json:"test_url"`
+}
 
 type ProxyConfig struct {
 	URL         string
@@ -56,6 +58,7 @@ type TestResult struct {
 	Latency  time.Duration
 	Error    string
 	HTTPCode int
+	Retries  int
 }
 
 type ResultStats struct {
@@ -68,7 +71,67 @@ type ResultStats struct {
 var (
 	activeTests int32
 	stats       ResultStats
+	appConfig   AppConfig
 )
+
+func loadAppConfig(configPath string) (*AppConfig, error) {
+	// Default configuration
+	defaultConfig := AppConfig{
+		XRAYPath:      "./xray.exe",
+		WorkerCount:   20,
+		TestTimeout:   10,
+		RetryCount:    3,
+		TargetAddress: "127.0.0.1",
+		TargetPort:    "40443",
+		TestURL:       "https://www.google.com/generate_204",
+	}
+
+	// Check if config file exists
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		fmt.Printf("Config file %s not found, using defaults\n", configPath)
+		return &defaultConfig, nil
+	}
+
+	// Read config file
+	data, err := ioutil.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %v", err)
+	}
+
+	// Parse JSON
+	var config AppConfig
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("failed to parse config file: %v", err)
+	}
+
+	// Apply defaults for missing values
+	if config.XRAYPath == "" {
+		config.XRAYPath = defaultConfig.XRAYPath
+	}
+	if config.WorkerCount == 0 {
+		config.WorkerCount = defaultConfig.WorkerCount
+	}
+	if config.TestTimeout == 0 {
+		config.TestTimeout = defaultConfig.TestTimeout
+	}
+	if config.RetryCount == 0 {
+		config.RetryCount = defaultConfig.RetryCount
+	}
+	if config.TargetAddress == "" {
+		config.TargetAddress = defaultConfig.TargetAddress
+	}
+	if config.TargetPort == "" {
+		config.TargetPort = defaultConfig.TargetPort
+	}
+	if config.TestURL == "" {
+		config.TestURL = defaultConfig.TestURL
+	}
+
+	// Convert timeout from seconds to duration
+	config.TestTimeout = config.TestTimeout * time.Second
+
+	return &config, nil
+}
 
 func ParseProxyURL(raw string) (*ProxyConfig, error) {
 	u, err := url.Parse(raw)
@@ -104,12 +167,12 @@ func ParseProxyURL(raw string) (*ProxyConfig, error) {
 	}
 
 	// Set to target address/port for processing
-	config.Address = TargetAddress
-	config.Port = TargetPort
+	config.Address = appConfig.TargetAddress
+	config.Port = appConfig.TargetPort
 
 	// Parse query parameters
 	query := u.Query()
-	
+
 	// Common parameters
 	config.Security = query.Get("security")
 	config.SNI = query.Get("sni")
@@ -124,7 +187,7 @@ func ParseProxyURL(raw string) (*ProxyConfig, error) {
 	}
 	config.Host = query.Get("host")
 	config.Path = query.Get("path")
-	
+
 	// VLESS-specific parameters
 	if config.Protocol == "vless" {
 		config.Encryption = query.Get("encryption")
@@ -187,7 +250,7 @@ func BuildOutbound(config *ProxyConfig) map[string]interface{} {
 		if config.Flow != "" {
 			server["flow"] = config.Flow
 		}
-		
+
 		outbound["settings"] = map[string]interface{}{
 			"vnext": []map[string]interface{}{server},
 		}
@@ -207,7 +270,7 @@ func BuildOutbound(config *ProxyConfig) map[string]interface{} {
 		if len(alpnList) == 0 {
 			alpnList = []string{"http/1.1"}
 		}
-		
+
 		tlsSettings := map[string]interface{}{
 			"serverName":  config.SNI,
 			"fingerprint": config.Fingerprint,
@@ -215,14 +278,14 @@ func BuildOutbound(config *ProxyConfig) map[string]interface{} {
 		if len(alpnList) > 0 {
 			tlsSettings["alpn"] = alpnList
 		}
-		
+
 		if config.Security == "reality" {
 			// Reality-specific settings
 			tlsSettings["realitySettings"] = map[string]interface{}{
 				"show": false,
 			}
 		}
-		
+
 		stream["tlsSettings"] = tlsSettings
 	}
 
@@ -238,12 +301,12 @@ func BuildOutbound(config *ProxyConfig) map[string]interface{} {
 			}
 		}
 		stream["wsSettings"] = wsSettings
-		
+
 	case "grpc":
 		stream["grpcSettings"] = map[string]interface{}{
 			"serviceName": config.Path,
 		}
-		
+
 	case "xhttp":
 		// xhttp is similar to http/2
 		stream["httpSettings"] = map[string]interface{}{
@@ -268,7 +331,7 @@ func startXrayWithConfig(config map[string]interface{}, configFile string) (*exe
 	if err := ensureDir("temp"); err != nil {
 		return nil, fmt.Errorf("failed to create temp directory: %v", err)
 	}
-	
+
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		return nil, err
@@ -278,7 +341,7 @@ func startXrayWithConfig(config map[string]interface{}, configFile string) (*exe
 		return nil, err
 	}
 
-	cmd := exec.Command(XRAYPath, "run", "-c", configFile)
+	cmd := exec.Command(appConfig.XRAYPath, "run", "-c", configFile)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 
@@ -290,7 +353,7 @@ func startXrayWithConfig(config map[string]interface{}, configFile string) (*exe
 	return cmd, nil
 }
 
-func testConfig(ctx context.Context, config *ProxyConfig, testPort int) *TestResult {
+func testConfigOnce(ctx context.Context, config *ProxyConfig, testPort int) *TestResult {
 	result := &TestResult{
 		Config:  config,
 		Working: false,
@@ -339,11 +402,11 @@ func testConfig(ctx context.Context, config *ProxyConfig, testPort int) *TestRes
 
 	// Test through SOCKS proxy
 	proxyURL, _ := url.Parse(fmt.Sprintf("socks5://127.0.0.1:%d", testPort))
-	
+
 	transport := &http.Transport{
 		Proxy: http.ProxyURL(proxyURL),
 		DialContext: (&net.Dialer{
-			Timeout:   TestTimeout,
+			Timeout:   appConfig.TestTimeout,
 			KeepAlive: 0,
 		}).DialContext,
 		TLSClientConfig: &tls.Config{
@@ -354,47 +417,78 @@ func testConfig(ctx context.Context, config *ProxyConfig, testPort int) *TestRes
 		DisableKeepAlives:   true,
 		TLSHandshakeTimeout: 5 * time.Second,
 	}
-	
+
 	client := &http.Client{
 		Transport: transport,
-		Timeout:   TestTimeout,
+		Timeout:   appConfig.TestTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
-	
-	// Test endpoints
-	testURLs := []string{
-		"https://www.google.com/generate_204",
-		"https://cloudflare.com/cdn-cgi/trace",
-		"http://www.gstatic.com/generate_204",
+
+	// Test single endpoint
+	req, err := http.NewRequestWithContext(ctx, "GET", appConfig.TestURL, nil)
+	if err != nil {
+		result.Error = fmt.Sprintf("Failed to create request: %v", err)
+		return result
 	}
 
-	for _, testURL := range testURLs {
-		req, err := http.NewRequestWithContext(ctx, "GET", testURL, nil)
-		if err != nil {
-			continue
-		}
-		
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-		req.Header.Set("Accept", "*/*")
-		req.Header.Set("Connection", "close")
-		
-		resp, err := client.Do(req)
-		if err == nil {
-			defer resp.Body.Close()
-			if resp.StatusCode == 200 || resp.StatusCode == 204 {
-				result.Working = true
-				result.HTTPCode = resp.StatusCode
-				result.Latency = time.Since(startTime)
-				return result
-			}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Connection", "close")
+
+	resp, err := client.Do(req)
+	if err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode == 200 || resp.StatusCode == 204 {
+			result.Working = true
 			result.HTTPCode = resp.StatusCode
+			result.Latency = time.Since(startTime)
+			return result
+		}
+		result.HTTPCode = resp.StatusCode
+		result.Error = fmt.Sprintf("HTTP %d", resp.StatusCode)
+	} else {
+		result.Error = err.Error()
+	}
+
+	return result
+}
+
+func testConfig(ctx context.Context, config *ProxyConfig, testPort int) *TestResult {
+	var lastResult *TestResult
+
+	// Retry mechanism
+	for attempt := 1; attempt <= appConfig.RetryCount; attempt++ {
+		// Check if context is cancelled
+		select {
+		case <-ctx.Done():
+			return &TestResult{
+				Config:  config,
+				Working: false,
+				Error:   "Context cancelled",
+				Retries: attempt - 1,
+			}
+		default:
+		}
+
+		result := testConfigOnce(ctx, config, testPort)
+		result.Retries = attempt
+
+		if result.Working {
+			return result
+		}
+
+		lastResult = result
+
+		// Wait before retry (exponential backoff)
+		if attempt < appConfig.RetryCount {
+			backoff := time.Duration(attempt) * 500 * time.Millisecond
+			time.Sleep(backoff)
 		}
 	}
 
-	result.Error = "All test endpoints failed"
-	return result
+	return lastResult
 }
 
 func fastTCPCheck(addr string, timeout time.Duration) bool {
@@ -408,40 +502,45 @@ func fastTCPCheck(addr string, timeout time.Duration) bool {
 
 func worker(ctx context.Context, configs <-chan *ProxyConfig, results chan<- *TestResult, portBase int, wg *sync.WaitGroup) {
 	defer wg.Done()
-	
+
 	port := portBase + int(atomic.AddInt32(&activeTests, 1))
-	
+
 	for config := range configs {
-		// Quick TCP pre-filter (now checking localhost:40443)
+		// Quick TCP pre-filter (now checking localhost:targetPort)
 		addr := net.JoinHostPort(config.Address, config.Port)
 		if !fastTCPCheck(addr, 2*time.Second) {
 			results <- &TestResult{
 				Config:  config,
 				Working: false,
 				Error:   "TCP connection failed",
+				Retries: 0,
 			}
 			atomic.AddInt32(&stats.Total, 1)
 			atomic.AddInt32(&stats.Dead, 1)
 			continue
 		}
-		
-		// Full test
+
+		// Full test with retries
 		result := testConfig(ctx, config, port)
-		
+
 		if result.Working {
 			atomic.AddInt32(&stats.Working, 1)
-			fmt.Printf("✓ WORKING | %s | %s -> %s:%s | Latency: %v\n", 
-				strings.ToUpper(config.Protocol), 
+			fmt.Printf("✓ WORKING | %s | %s -> %s:%s | Latency: %v | Retries: %d\n",
+				strings.ToUpper(config.Protocol),
 				config.OriginalAddress,
 				config.Address,
 				config.Port,
-				result.Latency)
+				result.Latency,
+				result.Retries)
 		} else {
 			atomic.AddInt32(&stats.Dead, 1)
-			fmt.Printf("✗ DEAD    | %s | %s | %s\n", 
-				strings.ToUpper(config.Protocol), config.OriginalAddress, result.Error)
+			fmt.Printf("✗ DEAD    | %s | %s | Error: %s | Retries: %d\n",
+				strings.ToUpper(config.Protocol),
+				config.OriginalAddress,
+				result.Error,
+				result.Retries)
 		}
-		
+
 		atomic.AddInt32(&stats.Total, 1)
 		results <- result
 	}
@@ -478,10 +577,12 @@ func printFinalReport() {
 	fmt.Printf("Working: %d\n", atomic.LoadInt32(&stats.Working))
 	fmt.Printf("Dead: %d\n", atomic.LoadInt32(&stats.Dead))
 	if atomic.LoadInt32(&stats.Total) > 0 {
-		fmt.Printf("Success rate: %.2f%%\n", 
+		fmt.Printf("Success rate: %.2f%%\n",
 			float64(atomic.LoadInt32(&stats.Working))/float64(atomic.LoadInt32(&stats.Total))*100)
 	}
 	fmt.Printf("Duration: %v\n", time.Since(stats.StartTime))
+	fmt.Printf("Retry count: %d\n", appConfig.RetryCount)
+	fmt.Printf("Test endpoint: %s\n", appConfig.TestURL)
 	fmt.Println(strings.Repeat("=", 60))
 }
 
@@ -492,43 +593,68 @@ func reconstructConfigURL(config *ProxyConfig) string {
 	if err != nil {
 		return config.RawURL
 	}
-	
-	// Replace host with 127.0.0.1:40443
-	u.Host = fmt.Sprintf("%s:%s", TargetAddress, TargetPort)
-	
+
+	// Replace host with target address and port
+	u.Host = fmt.Sprintf("%s:%s", appConfig.TargetAddress, appConfig.TargetPort)
+
 	// Return the reconstructed URL
 	return u.String()
 }
 
 func main() {
+	// Load configuration
+	configPath := "config.json"
+	if len(os.Args) > 2 && os.Args[1] == "-config" {
+		configPath = os.Args[2]
+	}
+
+	fmt.Printf("Loading configuration from %s...\n", configPath)
+	var err error
+	appConfigPtr, err := loadAppConfig(configPath)
+	if err != nil {
+		fmt.Printf("Error loading configuration: %v\n", err)
+		return
+	}
+	appConfig = *appConfigPtr
+
+	fmt.Printf("Configuration loaded:\n")
+	fmt.Printf("  XRAY Path: %s\n", appConfig.XRAYPath)
+	fmt.Printf("  Worker Count: %d\n", appConfig.WorkerCount)
+	fmt.Printf("  Test Timeout: %v\n", appConfig.TestTimeout)
+	fmt.Printf("  Retry Count: %d\n", appConfig.RetryCount)
+	fmt.Printf("  Target Address: %s:%s\n", appConfig.TargetAddress, appConfig.TargetPort)
+	fmt.Printf("  Test URL: %s\n", appConfig.TestURL)
+
 	// Check Xray
-	if _, err := os.Stat(XRAYPath); os.IsNotExist(err) {
-		fmt.Printf("Error: Xray not found at %s\n", XRAYPath)
-		fmt.Println("Please ensure Xray exists at the specified path")
+	if _, err := os.Stat(appConfig.XRAYPath); os.IsNotExist(err) {
+		fmt.Printf("Error: Xray not found at %s\n", appConfig.XRAYPath)
+		fmt.Println("Please ensure Xray exists at the specified path or update config.json")
 		return
 	}
 
 	// Load configs
 	configFile := "configs.txt"
-	if len(os.Args) > 1 {
+	if len(os.Args) > 1 && os.Args[1] != "-config" {
 		configFile = os.Args[1]
+	} else if len(os.Args) > 3 {
+		configFile = os.Args[3]
 	}
-	
-	fmt.Printf("Loading configs from %s...\n", configFile)
+
+	fmt.Printf("\nLoading configs from %s...\n", configFile)
 	configURLs, err := loadConfigsFromFile(configFile)
 	if err != nil {
 		fmt.Printf("Error loading configs: %v\n", err)
 		return
 	}
-	
+
 	if len(configURLs) == 0 {
 		fmt.Printf("No configs found in %s\n", configFile)
 		fmt.Println("Please add trojan:// or vless:// URLs (one per line)")
 		return
 	}
-	
+
 	fmt.Printf("Loaded %d configs\n", len(configURLs))
-	
+
 	// Parse configs
 	var configs []*ProxyConfig
 	for _, urlStr := range configURLs {
@@ -539,38 +665,39 @@ func main() {
 		}
 		configs = append(configs, config)
 	}
-	
+
 	if len(configs) == 0 {
 		fmt.Println("No valid configs found")
 		return
 	}
-	
-	fmt.Printf("Parsed %d valid configs (%d trojan, %d vless)\n", 
+
+	fmt.Printf("Parsed %d valid configs (%d trojan, %d vless)\n",
 		len(configs),
 		countProtocol(configs, "trojan"),
 		countProtocol(configs, "vless"))
-	fmt.Printf("Testing with modified address: %s:%s\n", TargetAddress, TargetPort)
-	
+	fmt.Printf("Testing with modified address: %s:%s\n", appConfig.TargetAddress, appConfig.TargetPort)
+	fmt.Printf("Each config will be retried up to %d times\n", appConfig.RetryCount)
+
 	// Setup
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	
+
 	stats = ResultStats{
 		StartTime: time.Now(),
 	}
-	
+
 	configChan := make(chan *ProxyConfig, len(configs))
 	resultsChan := make(chan *TestResult, len(configs))
-	
+
 	// Start workers
 	var wg sync.WaitGroup
 	portBase := 11080
-	
-	for i := 0; i < WorkerCount; i++ {
+
+	for i := 0; i < appConfig.WorkerCount; i++ {
 		wg.Add(1)
 		go worker(ctx, configChan, resultsChan, portBase+i*10, &wg)
 	}
-	
+
 	// Send configs
 	go func() {
 		for _, config := range configs {
@@ -582,13 +709,13 @@ func main() {
 		}
 		close(configChan)
 	}()
-	
+
 	// Collect results
 	go func() {
 		wg.Wait()
 		close(resultsChan)
 	}()
-	
+
 	// Display results
 	var workingConfigs []*TestResult
 	for result := range resultsChan {
@@ -596,11 +723,11 @@ func main() {
 			workingConfigs = append(workingConfigs, result)
 		}
 	}
-	
+
 	// Report
 	printFinalReport()
-	
-	// Save working configs with modified address (127.0.0.1:40443)
+
+	// Save working configs with modified address
 	if len(workingConfigs) > 0 {
 		outputFile := "working_configs.txt"
 		f, err := os.Create(outputFile)
@@ -609,11 +736,11 @@ func main() {
 			writer := bufio.NewWriter(f)
 			for _, result := range workingConfigs {
 				modifiedURL := reconstructConfigURL(result.Config)
-				fmt.Fprintf(writer, modifiedURL)
+				fmt.Fprintln(writer, modifiedURL)
 			}
 			writer.Flush()
 			fmt.Printf("\n✓ Working configs saved to: %s (%d configs)\n", outputFile, len(workingConfigs))
-			fmt.Printf("  Configs have been modified to use %s:%s\n", TargetAddress, TargetPort)
+			fmt.Printf("  Configs have been modified to use %s:%s\n", appConfig.TargetAddress, appConfig.TargetPort)
 		}
 	} else {
 		fmt.Println("\n✗ No working configs found")

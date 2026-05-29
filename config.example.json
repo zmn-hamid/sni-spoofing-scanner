@@ -1,0 +1,9 @@
+{
+    "xray_path": "./xray.exe",
+    "worker_count": 20,
+    "test_timeout_seconds": 10,
+    "retry_count": 3,
+    "target_address": "127.0.0.1",
+    "target_port": "40443",
+    "test_url": "https://www.google.com/generate_204"
+}
