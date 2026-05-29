@@ -2,3 +2,4 @@ temp/
 configs.txt
 working_configs.txt
 config.json
+dist/
