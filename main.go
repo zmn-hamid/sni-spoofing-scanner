@@ -23,6 +23,8 @@ const (
 	WorkerCount   = 20
 	TestTimeout   = 10 * time.Second
 	RetryCount    = 1
+	TargetAddress = "127.0.0.1"
+	TargetPort    = "40443"
 )
 
 type ProxyConfig struct {
@@ -44,6 +46,8 @@ type ProxyConfig struct {
 	HeaderType  string // For vless "type" parameter
 	Mode        string // For vless
 	RawURL      string
+	OriginalAddress string // Store original address for reference
+	OriginalPort    string // Store original port for reference
 }
 
 type TestResult struct {
@@ -92,11 +96,16 @@ func ParseProxyURL(raw string) (*ProxyConfig, error) {
 		return nil, fmt.Errorf("unsupported scheme: %s", u.Scheme)
 	}
 
-	config.Address = u.Hostname()
-	config.Port = u.Port()
-	if config.Port == "" {
-		config.Port = "443"
+	// Store original address and port
+	config.OriginalAddress = u.Hostname()
+	config.OriginalPort = u.Port()
+	if config.OriginalPort == "" {
+		config.OriginalPort = "443"
 	}
+
+	// Set to target address/port for processing
+	config.Address = TargetAddress
+	config.Port = TargetPort
 
 	// Parse query parameters
 	query := u.Query()
@@ -403,7 +412,7 @@ func worker(ctx context.Context, configs <-chan *ProxyConfig, results chan<- *Te
 	port := portBase + int(atomic.AddInt32(&activeTests, 1))
 	
 	for config := range configs {
-		// Quick TCP pre-filter
+		// Quick TCP pre-filter (now checking localhost:40443)
 		addr := net.JoinHostPort(config.Address, config.Port)
 		if !fastTCPCheck(addr, 2*time.Second) {
 			results <- &TestResult{
@@ -421,12 +430,16 @@ func worker(ctx context.Context, configs <-chan *ProxyConfig, results chan<- *Te
 		
 		if result.Working {
 			atomic.AddInt32(&stats.Working, 1)
-			fmt.Printf("✓ WORKING | %s | %s | Latency: %v\n", 
-				strings.ToUpper(config.Protocol), config.Address, result.Latency)
+			fmt.Printf("✓ WORKING | %s | %s -> %s:%s | Latency: %v\n", 
+				strings.ToUpper(config.Protocol), 
+				config.OriginalAddress,
+				config.Address,
+				config.Port,
+				result.Latency)
 		} else {
 			atomic.AddInt32(&stats.Dead, 1)
 			fmt.Printf("✗ DEAD    | %s | %s | %s\n", 
-				strings.ToUpper(config.Protocol), config.Address, result.Error)
+				strings.ToUpper(config.Protocol), config.OriginalAddress, result.Error)
 		}
 		
 		atomic.AddInt32(&stats.Total, 1)
@@ -470,6 +483,21 @@ func printFinalReport() {
 	}
 	fmt.Printf("Duration: %v\n", time.Since(stats.StartTime))
 	fmt.Println(strings.Repeat("=", 60))
+}
+
+// Reconstruct the original URL with modified address and port
+func reconstructConfigURL(config *ProxyConfig) string {
+	// Parse the original URL
+	u, err := url.Parse(config.RawURL)
+	if err != nil {
+		return config.RawURL
+	}
+	
+	// Replace host with 127.0.0.1:40443
+	u.Host = fmt.Sprintf("%s:%s", TargetAddress, TargetPort)
+	
+	// Return the reconstructed URL
+	return u.String()
 }
 
 func main() {
@@ -521,6 +549,7 @@ func main() {
 		len(configs),
 		countProtocol(configs, "trojan"),
 		countProtocol(configs, "vless"))
+	fmt.Printf("Testing with modified address: %s:%s\n", TargetAddress, TargetPort)
 	
 	// Setup
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -571,24 +600,20 @@ func main() {
 	// Report
 	printFinalReport()
 	
-	// Save working configs
+	// Save working configs with modified address (127.0.0.1:40443)
 	if len(workingConfigs) > 0 {
 		outputFile := "working_configs.txt"
 		f, err := os.Create(outputFile)
 		if err == nil {
 			defer f.Close()
 			writer := bufio.NewWriter(f)
-			fmt.Fprintln(writer, "# Working Proxy Configs")
-			fmt.Fprintln(writer, "# Format: Protocol | Address | Latency")
 			for _, result := range workingConfigs {
-				fmt.Fprintf(writer, "%s | %s | %s | %v\n", 
-					strings.ToUpper(result.Config.Protocol),
-					result.Config.Address,
-					result.Config.RawURL,
-					result.Latency)
+				modifiedURL := reconstructConfigURL(result.Config)
+				fmt.Fprintf(writer, modifiedURL)
 			}
 			writer.Flush()
 			fmt.Printf("\n✓ Working configs saved to: %s (%d configs)\n", outputFile, len(workingConfigs))
+			fmt.Printf("  Configs have been modified to use %s:%s\n", TargetAddress, TargetPort)
 		}
 	} else {
 		fmt.Println("\n✗ No working configs found")
