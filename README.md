@@ -6,6 +6,8 @@
 
 Supported config types: trojan, vless
 
+[فارسی](./README.fa.md)
+
 ---
 
 </div>
