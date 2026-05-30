@@ -24,12 +24,6 @@ others will be ignored
 
 ### Manual Installation
 
-Option 1:
-```
-go install github.com/matinsenpai/senpaiscanner/cmd/senpaiscanner@latest
-```
-
-Option 2:
 1. Install Golang.
 2. Clone this repo.
 3. Run `go mod download`

@@ -22,12 +22,6 @@
 
 ### نصب دستی
 
-گزینه ۱:
-```bash
-go install github.com/matinsenpai/senpaiscanner/cmd/senpaiscanner@latest
-```
-
-گزینه ۲:
 1. Golang را نصب کنید.
 2. این ریپازیتوری را کلون کنید.
 3. دستور `go mod download` را اجرا کنید.
