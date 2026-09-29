@@ -9,6 +9,8 @@ others will be ignored
 
 [فارسی](./README.fa.md)
 
+**Disclaimer:** This project is AI-generated.
+
 ---
 
 </div>
